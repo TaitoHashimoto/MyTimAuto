@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-16"?>
+<!--
+  MyTim残業超過報告 自動チェック タスクスケジューラ設定（テンプレート）
+
+  使い方:
+    1. このファイルを overtime_task.xml にコピー
+    2. <Arguments> 内の "FULL_PATH_TO_OVERTIME_VBS" を実際のパスに書き換え
+       例: /nologo "C:\Users\YourName\MyTimAuto\overtime.vbs"
+    3. schtasks /Create /XML overtime_task.xml /TN "MyTim_Overtime" でインポート
+-->
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>MyTim残業超過報告チェック（平日15:00-18:00 15分間隔）</Description>
+  </RegistrationInfo>
+  <Triggers>
+    <CalendarTrigger>
+      <Repetition>
+        <Interval>PT15M</Interval>
+        <Duration>PT3H</Duration>
+        <StopAtDurationEnd>false</StopAtDurationEnd>
+      </Repetition>
+      <StartBoundary>2026-01-01T15:00:00</StartBoundary>
+      <Enabled>true</Enabled>
+      <ScheduleByWeek>
+        <WeeksInterval>1</WeeksInterval>
+        <DaysOfWeek>
+          <Monday />
+          <Tuesday />
+          <Wednesday />
+          <Thursday />
+          <Friday />
+        </DaysOfWeek>
+      </ScheduleByWeek>
+    </CalendarTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <ExecutionTimeLimit>PT8M</ExecutionTimeLimit>
+    <StartWhenAvailable>false</StartWhenAvailable>
+    <Priority>7</Priority>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>wscript.exe</Command>
+      <Arguments>/nologo "FULL_PATH_TO_OVERTIME_VBS"</Arguments>
+    </Exec>
+  </Actions>
+</Task>
