@@ -31,6 +31,49 @@ def get_desktop_path() -> Path:
     return Path(path) if path else Path.home() / "Desktop"
 
 
+def detect_pythonw_path() -> str:
+    """現在の Python インタプリタに対応する pythonw.exe の絶対パスを返す。
+    Microsoft Store のスタブを避けるため sys.executable を起点に解決する。
+    """
+    exe = Path(sys.executable).resolve()
+    # python.exe → pythonw.exe（ウィンドウ無し）
+    candidate = exe.with_name("pythonw.exe")
+    if candidate.exists():
+        return str(candidate)
+    # pythonw が見つからない場合は python.exe を使う（コンソールが出る場合あり）
+    return str(exe)
+
+
+def regenerate_vbs_files(pythonw_exe: str):
+    """VBSラッパーをユーザー環境の Python フルパスで再生成する。
+    PATH 経由で Microsoft Store スタブを呼んでしまうのを防ぐため、絶対パス指定にする。
+    """
+    py_q = pythonw_exe.replace('"', '""')  # VBS内のダブルクォート対策
+    files = {
+        "overtime.vbs": ("overtime.py", ""),
+        "出勤.vbs":     ("punch.py", "1"),
+        "休憩.vbs":     ("punch.py", "2"),
+        "退勤.vbs":     ("punch.py", "3"),
+    }
+    for vbs_name, (script, arg) in files.items():
+        # 引数なし: "\script.py"""   →  ランタイム値: \script.py"
+        # 引数あり: "\script.py"" 1" →  ランタイム値: \script.py" 1
+        if arg:
+            tail = f'"\\{script}"" {arg}"'
+        else:
+            tail = f'"\\{script}"""'
+        content = (
+            'Dim shell, fso, script_dir\r\n'
+            'Set shell = CreateObject("WScript.Shell")\r\n'
+            'Set fso = CreateObject("Scripting.FileSystemObject")\r\n'
+            'script_dir = fso.GetParentFolderName(WScript.ScriptFullName)\r\n'
+            f'shell.Run """{py_q}"" """ & script_dir & {tail}, 0, False\r\n'
+        )
+        vbs_path = BASE_DIR / vbs_name
+        vbs_path.write_text(content, encoding="cp932")
+        print(f"  VBS再生成: {vbs_path}")
+
+
 def create_desktop_shortcuts():
     desktop = get_desktop_path()
     vbs_dir = BASE_DIR
@@ -190,6 +233,12 @@ async def setup():
 
     print()
     print(f"セッション保存完了: {STORAGE_FILE}")
+    print()
+    # Microsoft Store の Python スタブを避けるため、VBS を絶対パスで再生成
+    pythonw_exe = detect_pythonw_path()
+    print(f"Python 実行ファイル: {pythonw_exe}")
+    print("VBSランチャーを再生成中（絶対パス指定）...")
+    regenerate_vbs_files(pythonw_exe)
     print()
     print("デスクトップショートカットを作成中...")
     create_desktop_shortcuts()
