@@ -164,6 +164,8 @@ async def get_teams_message() -> str | None:
 
     async with async_playwright() as p:
         # headless=False: headlessモード・最小化状態だとTeamsのチャット本文が描画されない
+        # 対策: --window-position で画面外（負の座標）に配置 → ユーザーから見えないが
+        # Edge自体は通常通りレンダリングするため Teams のチャットも正しく描画される
         ctx = await p.chromium.launch_persistent_context(
             str(SESSION_DIR),
             channel="msedge",
@@ -171,6 +173,7 @@ async def get_teams_message() -> str | None:
             args=[
                 "--disable-blink-features=AutomationControlled",
                 "--window-size=1920,1080",
+                "--window-position=-32000,-32000",  # 画面外に配置（ユーザーから不可視）
                 # Edgeのアカウント検出/プロファイル切替プロンプトを無効化
                 "--disable-features=msEdgeProfileSwitcher,AccountConsistencyService,IdentityConsistency,EdgeProfileSwitcherFREDialog",
                 "--no-default-browser-check",

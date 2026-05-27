@@ -17,6 +17,9 @@ overtime_state.json
 # タスクスケジューラ設定（フルパス含む。テンプレートは overtime_task.example.xml）
 overtime_task.xml
 
+# VBSランチャー（ユーザー固有のPython絶対パスを含む。setup.pyが自動生成）
+*.vbs
+
 # 全てのログファイル（業務内容・氏名・メールアドレスを含む）
 *.log
 
