@@ -499,46 +499,76 @@ async def get_teams_message() -> str | None:
             log(f"デバッグ: 日付フィールド周辺={debug_info['context']}")
             log(f"デバッグ: 日付(任意)周辺={debug_info['dateAnyCtx']}")
 
-            # ── 優先パス: 送信者(MY_NAME)の最新の残業申請メッセージを本文から直接抽出 ──
-            # [TAISHO]残業連絡 は複数の人が投稿するグループチャット。
-            # Teams DOMは送信者ヘッダと本文を別要素にするため、要素単位の検索では
-            # 自分のメッセージを特定しづらい。
-            # 戦略: body.innerText 内のすべての「日付：YYYY/MM/DD」を見つけ、
-            #       その直前300文字以内に MY_NAME があるものを「自分の投稿」とみなす。
-            #       全フィールドが揃った（=サイドバー要約ではなく本文）ものを優先し、
-            #       その中で最新（=最も後ろの位置）を返す。
+            # ── 自分(MY_NAME)の最新の残業申請メッセージを本文から直接抽出 ──
+            # [TAISHO]残業連絡 は複数の人が投稿するグループチャット。他人の投稿を
+            # 誤って自分のものとして送信しないため、以下の条件で厳格に検出する：
+            #   1) 日付「日付：YYYY/MM/DD」の直前にMY_NAMEが存在する（最大300文字）
+            #   2) MY_NAMEと日付の間に「他人のセンダーヘッダ」（=改行+名前行+時刻行
+            #      パターン）が無い（→他人投稿の混入防止の決め手）
+            #   3) 抽出範囲内に全フィールド（残業予定/実績時間 + 当月休暇実績）が
+            #      揃っている（3/3 必須。<3 ならスキップして次回再試行）
+            #   4) DOM要素検索のフォールバックは行わない
             my_latest = await page.evaluate(f"""
                 () => {{
                     const sender = "{MY_NAME}";
                     const body   = document.body.innerText || "";
-                    const re     = /日付[：:]\\s*(\\d{{4}})\\/(\\d{{1,2}})\\/(\\d{{1,2}})/g;
+                    const dateRe = /日付[：:]\\s*(\\d{{4}})\\/(\\d{{1,2}})\\/(\\d{{1,2}})/g;
                     const nextDateRe = /日付[：:]\\s*\\d{{4}}\\/\\d{{1,2}}\\/\\d{{1,2}}/;
+                    // 他人のセンダーヘッダ: 改行 → 名前らしき行（2〜60字、※や日付パターンを含まない）
+                    // → 改行 → 時刻 (HH:MM)
+                    const otherSenderRe = /\\n([^\\n※]{{2,60}})\\n\\s*(?:\\d{{1,2}}:\\d{{2}}|昨日|今日)/;
+
+                    // MY_NAMEの全出現位置
+                    const senderPositions = [];
+                    let p = -1;
+                    while ((p = body.indexOf(sender, p + 1)) >= 0) senderPositions.push(p);
+
+                    // 全ての日付位置
+                    const dates = [];
+                    let dm;
+                    while ((dm = dateRe.exec(body)) !== null) {{
+                        dates.push({{
+                            idx: dm.index,
+                            end: dm.index + dm[0].length,
+                            date: dm[1] + "/" + dm[2] + "/" + dm[3],
+                        }});
+                    }}
+
                     const matches = [];
-                    let m;
-                    while ((m = re.exec(body)) !== null) {{
-                        // 直前300文字以内に送信者名があるかチェック（=自分の投稿）
-                        const before = body.substring(Math.max(0, m.index - 300), m.index);
-                        if (!before.includes(sender)) continue;
-                        // 抽出範囲は「日付」の位置から開始（手前は含めず別メッセージとの混在を防ぐ）
-                        // 終了位置は「次の 日付：YYYY/MM/DD まで」または1000文字
-                        const after = body.substring(m.index + m[0].length);
-                        const nd = after.match(nextDateRe);
+                    for (const d of dates) {{
+                        // この日付より前で最も近いMY_NAME位置
+                        let precedingSender = -1;
+                        for (const sp of senderPositions) {{
+                            if (sp < d.idx && sp > precedingSender) precedingSender = sp;
+                        }}
+                        if (precedingSender < 0) continue;
+                        const distance = d.idx - precedingSender;
+                        if (distance > 300) continue;  // 遠すぎる
+
+                        // MY_NAMEと日付の間に他人のセンダーヘッダが無いか
+                        const between = body.substring(precedingSender + sender.length, d.idx);
+                        const other = otherSenderRe.exec(between);
+                        if (other && !other[1].includes(sender)) continue;  // 他人のメッセージ
+
+                        // 抽出: 日付位置から次の日付パターン または1000文字
+                        const restAfter = body.substring(d.end);
+                        const nd = restAfter.match(nextDateRe);
                         let endOffset = 1000;
                         if (nd && nd.index < 1000) {{
-                            endOffset = m[0].length + nd.index;
+                            endOffset = (d.end - d.idx) + nd.index;
                         }}
-                        const text = body.substring(m.index, m.index + endOffset);
+                        const text = body.substring(d.idx, d.idx + endOffset);
                         const fields = ["残業予定時間", "残業実績時間", "当月休暇実績時間"];
                         const fieldCount = fields.filter(k => text.includes(k)).length;
                         matches.push({{
-                            idx: m.index,
-                            date: m[1] + "/" + m[2] + "/" + m[3],
+                            idx: d.idx,
+                            date: d.date,
                             text: text,
                             fieldCount: fieldCount,
+                            distance: distance,
                         }});
                     }}
                     if (!matches.length) return null;
-                    // フィールド数が多い順、同じならば後方位置順（=最新）
                     matches.sort((a, b) => {{
                         if (a.fieldCount !== b.fieldCount) return b.fieldCount - a.fieldCount;
                         return b.idx - a.idx;
@@ -546,88 +576,52 @@ async def get_teams_message() -> str | None:
                     return matches[0];
                 }}
             """)
-            if my_latest:
-                msg_text = my_latest["text"]
-                msg_date = my_latest["date"]
-                field_count = my_latest["fieldCount"]
-                log(f"自分の最新残業申請を検出: 日付={msg_date}, フィールド数={field_count}/3")
-                if "残業予定時間" in msg_text and "残業実績時間" in msg_text:
-                    safe_msg = msg_text.replace('\xa0', ' ')
-                    log(f"rawメッセージ(自分): {safe_msg[:120].replace(chr(10), '|')}...")
-                    clean = clean_overtime_message(safe_msg)
-                    log(f"整形後(自分): {clean.replace(chr(10), ' | ')}")
-                    if message_is_today(clean):
-                        return clean
-                    else:
-                        log(f"自分の最新メッセージは {msg_date} で本日ではないため却下します")
-                        # 本日分は無いと確定できるのでここで終了（DOM検索フォールバックは不要）
-                        return None
-                else:
-                    log("自分の最新メッセージに必要なフィールドが揃わず、DOM検索にフォールバック")
-            else:
+
+            if not my_latest:
                 log(f"自分（{MY_NAME}）の残業申請メッセージが本文中に見つかりませんでした")
-
-            # DOM から送信者（MY_NAME）＋残業フィールドを含む最小メッセージ要素を取得
-            # 日付チェックは message_is_today() に委ねる（フォーマット差異を吸収）
-            raw_texts = await page.evaluate(f"""
-                () => {{
-                    const sender   = "{MY_NAME}";
-                    const required = ["日付", "残業予定時間", "当月休暇実績時間"];
-                    const results  = [];
-                    for (const el of document.querySelectorAll('*')) {{
-                        const t = (el.innerText || "");
-                        if (t.includes(sender)
-                            && required.every(k => t.includes(k))) {{
-                            results.push({{ len: t.length, text: t }});
-                        }}
-                    }}
-                    if (!results.length) return [];
-                    results.sort((a, b) => a.len - b.len);
-                    const minLen = results[0].len;
-                    return results
-                        .filter(r => r.len <= minLen + 200)
-                        .map(r => r.text);
-                }}
-            """)
-
-            if not raw_texts:
-                log("残業申請メッセージが見つかりませんでした（DOM検索: 送信者+残業フィールド）")
                 return None
 
-            log(f"DOM候補: {len(raw_texts)}件")
-            # 全7フィールドを含むものを優先
-            full_candidates = [
-                t for t in raw_texts
-                if "当月深夜勤務累計" in t and "当月残業実績累計" in t
-            ]
-            target = (full_candidates[-1] if full_candidates else raw_texts[-1]).strip()
-            # \xa0（ノーブレークスペース）などを通常スペースに正規化してからログ出力
-            target = target.replace('\xa0', ' ').replace('​', '').replace('‍', '')
-            log(f"rawメッセージ: {target[:120].replace(chr(10), '|')}...")
-            clean = clean_overtime_message(target)
-            log(f"整形後: {clean.replace(chr(10), ' | ')}")
+            msg_text    = my_latest["text"]
+            msg_date    = my_latest["date"]
+            field_count = my_latest["fieldCount"]
+            log(f"自分の最新残業申請を検出: 日付={msg_date}, フィールド数={field_count}/3")
 
-            # 最終確認: 抽出した日付が本日であること
+            # フィールド不足のまま送信すると他人投稿の混入や不完全送信の恐れがあるため、
+            # 必ず 3/3 揃っていることを確認する
+            if field_count < 3:
+                log(f"[スキップ] フィールドが不足しています（{field_count}/3）。"
+                    "Teams上の該当メッセージがまだ完全に描画されていない可能性があります。"
+                    "次回実行で再試行します。")
+                return None
+
+            # 必須フィールドが揃っていることも確認（保険）
+            if "残業予定時間" not in msg_text or "残業実績時間" not in msg_text:
+                log("[スキップ] 残業予定時間/残業実績時間のいずれかが欠落。次回実行で再試行します。")
+                return None
+
+            safe_msg = msg_text.replace('\xa0', ' ')
+            log(f"rawメッセージ(自分): {safe_msg[:120].replace(chr(10), '|')}...")
+            clean = clean_overtime_message(safe_msg)
+            log(f"整形後(自分): {clean.replace(chr(10), ' | ')}")
+
             if not message_is_today(clean):
-                log("本日分の残業申請メッセージがありません（Teamsに今日の投稿が見当たりません）")
-                # 検出された最新メッセージが2日以上前のものなら、
-                # Teamsセッション切れ（「もう一度サインイン」バナー表示）の可能性を警告
-                m = DATE_PATTERN.search(clean)
-                if m:
-                    try:
-                        msg_date = date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
-                        days_old = (today_jst() - msg_date).days
-                        if days_old >= 2:
-                            log(f"[警告] 検出された最新メッセージは{days_old}日前のものです。")
-                            log("Teamsで「もう一度サインインする必要があります」バナーが出ている可能性があります。")
-                            log("→ その場合は setup.py を実行してTeamsに再サインインしてください。")
-                            notify(
-                                "残業報告 ⚠ 最新メッセージ未取得",
-                                f"検出された最新メッセージが{days_old}日前です\n"
-                                "Teams再サインインが必要な可能性 → setup.py 実行",
-                            )
-                    except ValueError:
-                        pass
+                log(f"自分の最新メッセージは {msg_date} で本日ではないため却下します")
+                # 検出メッセージが2日以上前ならセッション切れの可能性を警告
+                try:
+                    parts = msg_date.split("/")
+                    mdate = date(int(parts[0]), int(parts[1]), int(parts[2]))
+                    days_old = (today_jst() - mdate).days
+                    if days_old >= 2:
+                        log(f"[警告] 検出された最新メッセージは{days_old}日前のものです。")
+                        log("Teamsで「もう一度サインインする必要があります」バナーが出ている可能性があります。")
+                        log("→ その場合は setup.py を実行してTeamsに再サインインしてください。")
+                        notify(
+                            "残業報告 ⚠ 最新メッセージ未取得",
+                            f"検出された最新メッセージが{days_old}日前です\n"
+                            "Teams再サインインが必要な可能性 → setup.py 実行",
+                        )
+                except (ValueError, IndexError):
+                    pass
                 return None
 
             return clean
