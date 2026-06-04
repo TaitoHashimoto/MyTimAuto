@@ -164,6 +164,9 @@ async def reauth(action: str):
                 "--no-default-browser-check",
                 "--no-first-run",
                 "--disable-sync",
+                # 永続プロファイルに残った前回ウィンドウ位置（画面外）を上書き
+                "--window-position=100,100",
+                "--window-size=1280,900",
             ],
         )
         page = await ctx.new_page()
