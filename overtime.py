@@ -134,6 +134,7 @@ def save_state(state: dict):
 
 
 def notify(title: str, msg: str):
+    """通常通知（バルーンチップ）。6秒で消える。"""
     ps = f"""
 Add-Type -AssemblyName System.Windows.Forms
 $n = New-Object System.Windows.Forms.NotifyIcon
@@ -146,6 +147,25 @@ Start-Sleep -Seconds 7
 $n.Visible = $false
 $n.Dispose()
 """
+    subprocess.Popen(
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
+        creationflags=0x08000000,
+    )
+
+
+def notify_urgent(title: str, msg: str):
+    """重要通知（MessageBox）。ユーザーが「OK」を押すまで画面に残り続ける。
+    Teamsセッション切れなどユーザーの即対応が必要な場面で使用する。
+    """
+    # シングルクオートで囲って PowerShell 側に渡す（変数展開を避ける）
+    safe_title = title.replace("'", "''")
+    safe_msg   = msg.replace("'", "''")
+    ps = (
+        "Add-Type -AssemblyName System.Windows.Forms; "
+        f"[System.Windows.Forms.MessageBox]::Show('{safe_msg}','{safe_title}',"
+        "[System.Windows.Forms.MessageBoxButtons]::OK,"
+        "[System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null"
+    )
     subprocess.Popen(
         ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
         creationflags=0x08000000,
@@ -615,10 +635,14 @@ async def get_teams_message() -> str | None:
                         log(f"[警告] 検出された最新メッセージは{days_old}日前のものです。")
                         log("Teamsで「もう一度サインインする必要があります」バナーが出ている可能性があります。")
                         log("→ その場合は setup.py を実行してTeamsに再サインインしてください。")
-                        notify(
-                            "残業報告 ⚠ 最新メッセージ未取得",
-                            f"検出された最新メッセージが{days_old}日前です\n"
-                            "Teams再サインインが必要な可能性 → setup.py 実行",
+                        # MessageBox で確実にユーザーに気づかせる（OKを押すまで消えない）
+                        notify_urgent(
+                            "MyTim残業報告 ⚠ Teams再サインインが必要",
+                            f"Teamsの最新メッセージが{days_old}日前のままで、新しい投稿が取得できません。\n\n"
+                            "セッションが切れている可能性があります。\n"
+                            "以下を実行してTeamsに再サインインしてください:\n\n"
+                            "  python setup.py\n\n"
+                            "完了後、もう一度 overtime.py を実行してください。",
                         )
                 except (ValueError, IndexError):
                     pass
