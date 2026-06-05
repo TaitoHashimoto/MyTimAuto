@@ -11,6 +11,8 @@ from pathlib import Path
 from urllib.parse import urlparse
 from playwright.async_api import async_playwright
 
+from winutil import offscreen_args, move_browser_window_to_center
+
 # ログ等の日付・時刻はJST固定（PCタイムゾーン設定に依存しない）
 JST = timezone(timedelta(hours=9), name="JST")
 
@@ -154,6 +156,7 @@ async def reauth(action: str):
     SESSION_DIR.mkdir(exist_ok=True)
 
     async with async_playwright() as p:
+        # 最初は画面外で起動（SSO/WAMで自動認証されればユーザーに気づかれない）
         ctx = await p.chromium.launch_persistent_context(
             str(SESSION_DIR),
             channel="msedge",          # Edge SSO / WAM でサインインを省略
@@ -164,16 +167,23 @@ async def reauth(action: str):
                 "--no-default-browser-check",
                 "--no-first-run",
                 "--disable-sync",
-                # 永続プロファイルに残った前回ウィンドウ位置（画面外）を上書き
-                "--window-position=100,100",
-                "--window-size=1280,900",
+                # 画面外起動。サインインが必要な場合のみ後で中央へ移動
+                *offscreen_args(),
             ],
         )
         page = await ctx.new_page()
         await page.goto(MYTIM_URL, timeout=60_000)
 
         if not on_mytim(page.url):
-            log("ブラウザでログインしてください（Edge が開いています）...")
+            # SSOで自動認証されなかった → ユーザー操作のため画面中央へ移動
+            log("MyTimサインインが必要です。Edgeを画面中央に移動します。")
+            moved = await move_browser_window_to_center(page)
+            if not moved:
+                log("ウィンドウ移動に失敗しました（Edgeは画面外のままの可能性）")
+            notify(
+                "MyTim サインインが必要 ⚠",
+                "打刻のためEdgeを開きました\nMyTimにサインインしてください",
+            )
             try:
                 await page.wait_for_function(
                     f"() => location.hostname === '{MYTIM_HOST}'",

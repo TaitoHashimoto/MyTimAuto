@@ -8,6 +8,8 @@ import sys
 from pathlib import Path
 from playwright.async_api import async_playwright
 
+from winutil import centered_args
+
 BASE_DIR = Path(__file__).parent
 SESSION_DIR = BASE_DIR / "session"
 STORAGE_FILE = BASE_DIR / "storage.json"
@@ -124,9 +126,8 @@ async def setup():
                 "--no-default-browser-check",
                 "--no-first-run",
                 "--disable-sync",
-                # 永続プロファイルに残った前回ウィンドウ位置（画面外）を上書き
-                "--window-position=100,100",
-                "--window-size=1280,900",
+                # 画面中央に配置（ユーザーが必ず操作するため、最初から見える位置）
+                *centered_args(),
             ],
         )
         page = await ctx.new_page()

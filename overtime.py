@@ -15,6 +15,8 @@ from pathlib import Path
 from urllib.parse import urlparse
 from playwright.async_api import async_playwright
 
+from winutil import offscreen_args, move_browser_window_to_center
+
 # 全ての日付・時刻はJST固定で扱う（PCのタイムゾーン設定に依存しないため）
 # tzdataパッケージなしで動かすため timezone(timedelta) 形式を使う
 JST = timezone(timedelta(hours=9), name="JST")
@@ -184,7 +186,7 @@ async def get_teams_message() -> str | None:
 
     async with async_playwright() as p:
         # headless=False: headlessモード・最小化状態だとTeamsのチャット本文が描画されない
-        # 対策: --window-position で画面外（負の座標）に配置 → ユーザーから見えないが
+        # 対策: 画面外（負の座標）に配置 → ユーザーから見えないが
         # Edge自体は通常通りレンダリングするため Teams のチャットも正しく描画される
         ctx = await p.chromium.launch_persistent_context(
             str(SESSION_DIR),
@@ -192,13 +194,13 @@ async def get_teams_message() -> str | None:
             headless=False,
             args=[
                 "--disable-blink-features=AutomationControlled",
-                "--window-size=1920,1080",
-                "--window-position=-32000,-32000",  # 画面外に配置（ユーザーから不可視）
                 # Edgeのアカウント検出/プロファイル切替プロンプトを無効化
                 "--disable-features=msEdgeProfileSwitcher,AccountConsistencyService,IdentityConsistency,EdgeProfileSwitcherFREDialog",
                 "--no-default-browser-check",
                 "--no-first-run",
                 "--disable-sync",
+                # ユーザーから不可視（画面外）
+                *offscreen_args(window_w=1920, window_h=1080),
             ],
         )
         page = await ctx.new_page()
@@ -712,6 +714,7 @@ async def reauth_and_submit(hours: str, reason: str) -> bool:
     SESSION_DIR.mkdir(exist_ok=True)
 
     async with async_playwright() as p:
+        # 最初は画面外で起動（SSO/WAMで自動認証されればユーザーに気づかれない）
         ctx = await p.chromium.launch_persistent_context(
             str(SESSION_DIR),
             channel="msedge",
@@ -722,9 +725,8 @@ async def reauth_and_submit(hours: str, reason: str) -> bool:
                 "--no-default-browser-check",
                 "--no-first-run",
                 "--disable-sync",
-                # 永続プロファイルに残った前回ウィンドウ位置（画面外）を上書き
-                "--window-position=100,100",
-                "--window-size=1280,900",
+                # 画面外起動。サインインが必要な場合のみ後で中央へ移動
+                *offscreen_args(),
             ],
         )
         page = await ctx.new_page()
@@ -732,7 +734,16 @@ async def reauth_and_submit(hours: str, reason: str) -> bool:
             await page.goto(MYTIM_URL, timeout=60_000)
 
             if urlparse(page.url).netloc != MYTIM_HOST:
-                log("Edge でサインインしてください（ブラウザが開いています）...")
+                # SSOで自動認証されず、ユーザーのサインインが必要
+                # → Edgeウィンドウを画面中央に出して見えるようにする
+                log("MyTimサインインが必要です。Edgeを画面中央に移動します。")
+                moved = await move_browser_window_to_center(page)
+                if not moved:
+                    log("ウィンドウ移動に失敗しましたが処理続行（Edgeは画面外のままの可能性）")
+                notify(
+                    "MyTim サインインが必要 ⚠",
+                    "残業報告のためEdgeを開きました\nMyTimにサインインしてください",
+                )
                 try:
                     await page.wait_for_function(
                         f"() => location.hostname === '{MYTIM_HOST}'",
