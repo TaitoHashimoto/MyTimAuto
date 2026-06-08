@@ -391,6 +391,89 @@ async def get_teams_message() -> str | None:
                 log(f"「最新へジャンプ」ボタンをクリック: text={jumped.get('text')}, label={jumped.get('label')}")
                 await page.wait_for_timeout(3_000)
 
+            # メッセージペインにフォーカスを当てて Ctrl+End で最下部へジャンプ
+            # （スクロールだけだと永続プロファイルの位置記憶で古い位置に留まることがあるため）
+            # Ctrl+End は1回だと未読領域の途中で止まる場合があるので、本日付が出るか
+            # 出現しなくなるまで最大5回繰り返す
+            async def _focus_message_pane():
+                return await page.evaluate("""
+                    () => {
+                        const sels = [
+                            '[role="log"]',
+                            '[data-tid="message-pane-list"]',
+                            '[data-tid="messageListContainer"]',
+                            'div[id*="message-pane"]',
+                        ];
+                        for (const sel of sels) {
+                            const el = document.querySelector(sel);
+                            if (el) {
+                                try { el.focus(); } catch(e) {}
+                                try { el.scrollIntoView({ block: 'end' }); } catch(e) {}
+                                try { el.scrollTop = el.scrollHeight; } catch(e) {}
+                                return sel;
+                            }
+                        }
+                        return null;
+                    }
+                """)
+
+            try:
+                focused = await _focus_message_pane()
+                if focused:
+                    log(f"メッセージペインにフォーカス: {focused}")
+                # 「最後のメッセージ要素を scrollIntoView」 + Ctrl+End の組合せを繰り返す。
+                # サイドバーには既に1回目出現するので、本日付が2件以上見つかれば本文にも到達
+                for end_attempt in range(5):
+                    await _focus_message_pane()
+                    await page.wait_for_timeout(300)
+                    # 最後のメッセージ要素を強制的に画面内に持ってくる
+                    scroll_result = await page.evaluate("""
+                        () => {
+                            const candidates = [
+                                '[role="log"] [role="listitem"]',
+                                '[data-tid="message-pane-list"] > div',
+                                '[role="log"] > div > div',
+                                'div[id*="message-pane"] > div > div',
+                            ];
+                            for (const sel of candidates) {
+                                const items = document.querySelectorAll(sel);
+                                if (items.length > 0) {
+                                    const last = items[items.length - 1];
+                                    last.scrollIntoView({ block: 'end', behavior: 'instant' });
+                                    return { sel: sel, count: items.length };
+                                }
+                            }
+                            return null;
+                        }
+                    """)
+                    if scroll_result:
+                        log(f"  scrollIntoView: sel={scroll_result['sel']}, items={scroll_result['count']}")
+                    await page.keyboard.press("Control+End")
+                    await page.wait_for_timeout(2_500)
+                    today_count = await page.evaluate(f"""
+                        () => {{
+                            const b = document.body.innerText || "";
+                            const patterns = [
+                                "日付：{today_str}",
+                                "日付:{today_str}",
+                                "日付：{today_str_short}",
+                                "日付:{today_str_short}",
+                            ];
+                            let total = 0;
+                            for (const pat of patterns) {{
+                                let i = -1;
+                                while ((i = b.indexOf(pat, i + 1)) >= 0) total++;
+                            }}
+                            return total;
+                        }}
+                    """)
+                    log(f"  最新化試行 {end_attempt + 1}/5: 本日付の出現回数={today_count}")
+                    # 2件以上 = サイドバープレビュー + 本文 の両方に到達
+                    if today_count >= 2:
+                        break
+            except Exception as e:
+                log(f"フォーカス/End処理に失敗: {e}")
+
             # メッセージスレッドを最下部へスクロール（最大8回 / 増加が止まったら終了）
             # サイドバーではなくメッセージペインをスクロール対象とする
             prev_scroll_h = 0
