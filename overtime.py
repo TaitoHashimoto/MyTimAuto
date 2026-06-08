@@ -5,6 +5,7 @@ MyTim の「標準労働時間超過報告」フォームを自動送信する�
 14:00〜18:00（平日）の間に10分ごとに実行されることを想定。
 """
 import re
+import sys
 import json
 import html
 import asyncio
@@ -115,12 +116,17 @@ def message_is_today(message: str) -> bool:
 def log(msg: str):
     timestamp = now_jst().strftime("%Y-%m-%d %H:%M:%S")
     line = f"[{timestamp}] {msg}"
+    # ファイルは UTF-8 で正確に保存
+    with open(LOG_FILE, "a", encoding="utf-8") as f:
+        f.write(line + "\n")
+    # 標準出力は OS エンコーディング（cp932 等）に対応できるように
+    # 表示不能な文字を ? に置換してから print
     try:
         print(line)
     except UnicodeEncodeError:
-        print(line.encode(errors="replace").decode(errors="replace"))
-    with open(LOG_FILE, "a", encoding="utf-8") as f:
-        f.write(line + "\n")
+        enc = (sys.stdout.encoding or "cp932")
+        safe = line.encode(enc, errors="replace").decode(enc, errors="replace")
+        print(safe)
 
 
 def load_state() -> dict:
@@ -556,6 +562,8 @@ async def get_teams_message() -> str | None:
                         }});
                     }}
 
+                    // 各日付候補について全状況を記録（デバッグ用 candidates も含めて返す）
+                    const candidates = [];
                     const matches = [];
                     for (const d of dates) {{
                         // この日付より前で最も近いMY_NAME位置
@@ -563,14 +571,36 @@ async def get_teams_message() -> str | None:
                         for (const sp of senderPositions) {{
                             if (sp < d.idx && sp > precedingSender) precedingSender = sp;
                         }}
-                        if (precedingSender < 0) continue;
-                        const distance = d.idx - precedingSender;
-                        if (distance > 300) continue;  // 遠すぎる
+                        const distance = precedingSender >= 0 ? (d.idx - precedingSender) : -1;
 
-                        // MY_NAMEと日付の間に他人のセンダーヘッダが無いか
-                        const between = body.substring(precedingSender + sender.length, d.idx);
-                        const other = otherSenderRe.exec(between);
-                        if (other && !other[1].includes(sender)) continue;  // 他人のメッセージ
+                        // MY_NAMEと日付の間の文字列、および他人センダー検出
+                        let between = "";
+                        let otherSenderName = null;
+                        if (precedingSender >= 0) {{
+                            between = body.substring(precedingSender + sender.length, d.idx);
+                            const other = otherSenderRe.exec(between);
+                            if (other && !other[1].includes(sender)) {{
+                                otherSenderName = other[1];
+                            }}
+                        }}
+
+                        // 除外理由を判定
+                        let excludeReason = null;
+                        if (precedingSender < 0) excludeReason = "MY_NAME 先行なし";
+                        else if (distance > 300) excludeReason = `距離超過(${{distance}}文字)`;
+                        else if (otherSenderName) excludeReason = `他人のセンダー混在: ${{otherSenderName}}`;
+
+                        // 候補として登録
+                        const cand = {{
+                            idx: d.idx,
+                            date: d.date,
+                            distance: distance,
+                            otherSender: otherSenderName,
+                            excludeReason: excludeReason,
+                            betweenPreview: between.substring(0, 80).replace(/\\n/g, "|"),
+                        }};
+                        candidates.push(cand);
+                        if (excludeReason) continue;
 
                         // 抽出: 日付位置から次の日付パターン または1000文字
                         const restAfter = body.substring(d.end);
@@ -590,22 +620,49 @@ async def get_teams_message() -> str | None:
                             distance: distance,
                         }});
                     }}
-                    if (!matches.length) return null;
                     matches.sort((a, b) => {{
                         if (a.fieldCount !== b.fieldCount) return b.fieldCount - a.fieldCount;
                         return b.idx - a.idx;
                     }});
-                    return matches[0];
+                    // 本日付の候補だけ抽出
+                    const todayCands = candidates.filter(c =>
+                        c.date === "{today_str}" || c.date === "{today_str_short}"
+                    );
+                    return {{
+                        match: matches.length ? matches[0] : null,
+                        candidates: candidates,
+                        todayCandidates: todayCands,
+                        senderCount: senderPositions.length,
+                        dateCount: dates.length,
+                        senderPositions: senderPositions,
+                    }};
                 }}
             """)
 
-            if not my_latest:
+            # ── 詳細デバッグ: 全日付候補と各々の判定理由をログ ─────────────
+            log(f"検出統計: 全日付出現={my_latest['dateCount']}件, MY_NAME出現={my_latest['senderCount']}件")
+            log(f"MY_NAME出現位置(idx): {my_latest.get('senderPositions', [])}")
+            today_cands = my_latest.get("todayCandidates", [])
+            log(f"本日({today_str}/{today_str_short})の日付候補: {len(today_cands)}件")
+            for i, c in enumerate(today_cands):
+                status = c.get("excludeReason") or "✅採用候補"
+                log(f"  本日候補[{i}] 日付={c['date']} idx={c['idx']} 距離={c['distance']} → {status}")
+                if c.get("betweenPreview"):
+                    log(f"           MY_NAME〜日付の間: {c['betweenPreview']}")
+            # 全体の末尾も参考表示
+            log(f"全候補末尾12件:")
+            for i, c in enumerate(my_latest["candidates"][-12:]):
+                status = c.get("excludeReason") or "✅採用候補"
+                log(f"  候補 日付={c['date']} idx={c['idx']} 距離={c['distance']} → {status}")
+
+            match = my_latest.get("match")
+            if not match:
                 log(f"自分（{MY_NAME}）の残業申請メッセージが本文中に見つかりませんでした")
                 return None
 
-            msg_text    = my_latest["text"]
-            msg_date    = my_latest["date"]
-            field_count = my_latest["fieldCount"]
+            msg_text    = match["text"]
+            msg_date    = match["date"]
+            field_count = match["fieldCount"]
             log(f"自分の最新残業申請を検出: 日付={msg_date}, フィールド数={field_count}/3")
 
             # フィールド不足のまま送信すると他人投稿の混入や不完全送信の恐れがあるため、
