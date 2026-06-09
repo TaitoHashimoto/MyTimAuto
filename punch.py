@@ -224,8 +224,37 @@ async def do_punch(action: str):
         page = await ctx.new_page()
 
         try:
-            await page.goto(MYTIM_URL, timeout=60_000)
-            await page.wait_for_load_state("networkidle", timeout=20_000)
+            # ネットワーク一時エラー（ERR_CONNECTION_ABORTED 等）対策として
+            # 接続失敗時は最大3回まで間隔を空けてリトライする
+            last_err = None
+            navigated = False
+            for nav_attempt in range(3):
+                try:
+                    await page.goto(MYTIM_URL, timeout=60_000)
+                    await page.wait_for_load_state("networkidle", timeout=20_000)
+                    navigated = True
+                    break
+                except Exception as e:
+                    last_err = e
+                    err_msg = str(e)
+                    log(f"MyTim接続試行 {nav_attempt + 1}/3 失敗: {err_msg[:120]}")
+                    # 一時的なネットワークエラーかどうか判定
+                    transient = any(k in err_msg for k in [
+                        "ERR_CONNECTION_ABORTED",
+                        "ERR_CONNECTION_CLOSED",
+                        "ERR_CONNECTION_RESET",
+                        "ERR_NETWORK_CHANGED",
+                        "ERR_TIMED_OUT",
+                        "ERR_NAME_NOT_RESOLVED",
+                    ])
+                    if not transient:
+                        break  # 一時的でないエラーはリトライしても無駄
+                    if nav_attempt < 2:
+                        wait_sec = (nav_attempt + 1) * 5
+                        log(f"  {wait_sec}秒待機してリトライします")
+                        await page.wait_for_timeout(wait_sec * 1000)
+            if not navigated:
+                raise last_err if last_err else RuntimeError("MyTim接続に失敗")
 
             if not on_mytim(page.url):
                 log(f"セッション切れ（URL: {page.url[:80]}）。再認証が必要です...")
@@ -238,7 +267,12 @@ async def do_punch(action: str):
             await ctx.storage_state(path=str(STORAGE_FILE))
 
         except Exception as e:
-            notify("MyTim エラー", str(e)[:80])
+            notify(
+                "MyTim 打刻エラー ⚠",
+                f"{action}の打刻に失敗しました\n"
+                "・ショートカットをもう一度実行\n"
+                "・解決しなければEdgeを終了して再試行",
+            )
             log(f"[ERROR] {e}\n{traceback.format_exc()}")
         finally:
             await ctx.close()
