@@ -79,10 +79,16 @@ def regenerate_vbs_files(pythonw_exe: str):
 def create_desktop_shortcuts():
     desktop = get_desktop_path()
     vbs_dir = BASE_DIR
+    # shell32.dll のアイコンインデックス (Windows標準アイコン)
+    #   77  : 時計  (出勤)
+    #   130 : 一時停止 (休憩)
+    #   131 : 停止   (退勤)
+    #   265 : ノート (残業申請)
     icons = {
-        "出勤": ("MyTim_出勤.lnk", str(vbs_dir / "出勤.vbs"), "77"),
-        "休憩": ("MyTim_休憩.lnk", str(vbs_dir / "休憩.vbs"), "130"),
-        "退勤": ("MyTim_退勤.lnk", str(vbs_dir / "退勤.vbs"), "131"),
+        "出勤":     ("MyTim_出勤.lnk",     str(vbs_dir / "出勤.vbs"),     "77"),
+        "休憩":     ("MyTim_休憩.lnk",     str(vbs_dir / "休憩.vbs"),     "130"),
+        "退勤":     ("MyTim_退勤.lnk",     str(vbs_dir / "退勤.vbs"),     "131"),
+        "残業申請": ("MyTim_残業申請.lnk", str(vbs_dir / "overtime.vbs"), "265"),
     }
     for label, (link_name, target, icon_idx) in icons.items():
         link_path = desktop / link_name
@@ -251,8 +257,9 @@ async def setup():
     print("  セットアップ完了！")
     print("=" * 50)
     print()
-    print("デスクトップのショートカットをダブルクリックするだけで打刻できます。")
+    print("デスクトップのショートカットをダブルクリックするだけで操作できます。")
     print("  MyTim_出勤.lnk / MyTim_休憩.lnk / MyTim_退勤.lnk")
+    print("  MyTim_残業申請.lnk  (← Teamsの本日投稿をMyTimへ手動送信)")
 
 
 if __name__ == "__main__":
