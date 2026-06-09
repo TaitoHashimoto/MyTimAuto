@@ -316,6 +316,52 @@ async def get_teams_message() -> str | None:
             # WebSocket同期と最新メッセージ受信を待つ（長めに待機）
             await page.wait_for_timeout(10_000)
 
+            # ── サイドバーの対象チャットを直接クリックして最新メッセージを強制ロード ──
+            # アンカー付きURLでナビゲートすると、その古いメッセージ付近で停止することがある。
+            # サイドバーの該当チャット項目をクリックすると、Teamsは「最新位置で開く」動作を
+            # 実行し、サーバから最新のメッセージ群を再取得して描画する。
+            try:
+                # サイドバー内で「[TAISHO]残業連絡」を含むチャット項目をクリック
+                # Teams のサイドバーは a タグではなく div + click event で実装されているため、
+                # テキスト一致でクリック対象を特定する
+                clicked = await page.evaluate("""
+                    () => {
+                        const TARGET_CHAT_NAME = "[TAISHO]残業連絡";
+                        // サイドバー内のチャット項目を絞り込み
+                        const selectors = [
+                            '[data-tid*="chat-list"] [role="treeitem"]',
+                            '[data-tid*="chat-list-item"]',
+                            'div[role="treeitem"]',
+                            '[role="tree"] [role="treeitem"]',
+                            'li[role="treeitem"]',
+                        ];
+                        for (const sel of selectors) {
+                            const items = document.querySelectorAll(sel);
+                            for (const item of items) {
+                                const text = item.textContent || "";
+                                if (text.includes(TARGET_CHAT_NAME)) {
+                                    // クリックして最新位置でチャットを開き直させる
+                                    try { item.click(); } catch(e) {}
+                                    // また、子要素のリンク or ボタンもクリックを試みる
+                                    const inner = item.querySelector('a, button, [role="link"], [role="button"]');
+                                    if (inner) {
+                                        try { inner.click(); } catch(e) {}
+                                    }
+                                    return { sel: sel, text: text.substring(0, 60) };
+                                }
+                            }
+                        }
+                        return null;
+                    }
+                """)
+                if clicked:
+                    log(f"サイドバーで対象チャットをクリック: sel={clicked['sel']}, text={clicked['text']}")
+                    await page.wait_for_timeout(5_000)  # チャット再ロード待ち
+                else:
+                    log("サイドバーで対象チャット項目が見つかりませんでした（処理続行）")
+            except Exception as e:
+                log(f"サイドバークリック処理に失敗（処理続行）: {e}")
+
             # ── Teams再サインイン要求バナーの検知 ─────────────────────────────
             # Teamsはセッション切れ時、ページ上部に赤いバナーで再サインインを要求する。
             # この状態では古いキャッシュのみ表示され、サーバから最新メッセージが
@@ -952,16 +998,9 @@ async def submit_overtime_report(hours: str, reason: str) -> bool:
                 pass
 
 
-async def run(force: bool = False, dry_run: bool = False):
-    now = now_jst()
-
-    if not force:
-        if now.weekday() >= 5:
-            log("土日のためスキップ")
-            return
-        if not (15 <= now.hour < 18):
-            log(f"対象時間外（{now.strftime('%H:%M')}）のためスキップ")
-            return
+async def run(dry_run: bool = False):
+    # 実行タイミング（曜日・時間帯）はタスクスケジューラ側で制御するため、
+    # スクリプト内でのチェックは行わない。手動実行も常に動作する。
 
     state = load_state()
     today = today_jst().isoformat()
@@ -1003,13 +1042,12 @@ async def run(force: bool = False, dry_run: bool = False):
 
 
 if __name__ == "__main__":
-    import sys
-    force = "--force" in sys.argv
+    # --force は後方互換のため受け取るがロジック上は無効（時間帯チェックを廃止したため）
     dry_run = "--dry-run" in sys.argv
-    mode = "（ドライラン）" if dry_run else "（強制実行）" if force else ""
+    mode = "（ドライラン）" if dry_run else ""
     log(f"=== 残業報告チェック開始{mode} ===")
     try:
-        asyncio.run(run(force=force, dry_run=dry_run))
+        asyncio.run(run(dry_run=dry_run))
     except Exception as e:
         log(f"[FATAL] {e}\n{traceback.format_exc()}")
     log("=== 残業報告チェック終了 ===")
