@@ -55,10 +55,17 @@ except ImportError as _e:
         "config.example.py を config.py にコピーして値を設定してください。"
     ) from _e
 
-# l/message URL はランチャー経由になるため、
-# ランチャーが使う /_#/l/message/ を /v2/#/l/message/ に変換した直接URLを使用
-# このURLを使うとサイドバーで対象チャットがハイライトされ最新メッセージプレビューが見える
+# Teams チャットを「最新メッセージ位置」で開くためのURL。
+# 旧 URL: /v2/#/l/message/{chatId}/{anchorMsgId} は古い anchor 位置で
+#         停止してしまい、最新メッセージが本文に描画されない問題があった。
+# 新 URL: /v2/#/conversations/{chatId} はチャットを最新位置で開く挙動。
+# ※ TEAMS_ANCHOR_MSG はフォールバック用に残してある
 TEAMS_URL = (
+    f"https://teams.microsoft.com/v2/#/conversations/{TEAMS_CHAT_ID}"
+    f"?ctx=chat"
+)
+# 旧URL（フォールバック用）
+TEAMS_URL_LEGACY = (
     f"https://teams.microsoft.com/v2/#/l/message/{TEAMS_CHAT_ID}/{TEAMS_ANCHOR_MSG}"
     f"?context=%7B%22contextType%22%3A%22chat%22%7D"
 )

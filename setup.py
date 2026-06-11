@@ -178,10 +178,10 @@ async def setup():
         print("(最大5分待機します。完了すると自動で次に進みます)")
         print()
 
+        # チャットを最新メッセージ位置で開く
         teams_chat_url = (
-            f"https://teams.microsoft.com/v2/#/l/message/"
-            f"{TEAMS_CHAT_ID}/{TEAMS_ANCHOR_MSG}"
-            f"?context=%7B%22contextType%22%3A%22chat%22%7D"
+            f"https://teams.microsoft.com/v2/#/conversations/{TEAMS_CHAT_ID}"
+            f"?ctx=chat"
         )
         teams_page = await ctx.new_page()
         try:
