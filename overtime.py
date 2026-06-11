@@ -671,9 +671,12 @@ async def get_teams_message() -> str | None:
                     const body   = document.body.innerText || "";
                     const dateRe = /日付[：:]\\s*(\\d{{4}})\\/(\\d{{1,2}})\\/(\\d{{1,2}})/g;
                     const nextDateRe = /日付[：:]\\s*\\d{{4}}\\/\\d{{1,2}}\\/\\d{{1,2}}/;
-                    // 他人のセンダーヘッダ: 改行 → 名前らしき行（2〜60字、※や日付パターンを含まない）
-                    // → 改行 → 時刻 (HH:MM)
-                    const otherSenderRe = /\\n([^\\n※]{{2,60}})\\n\\s*(?:\\d{{1,2}}:\\d{{2}}|昨日|今日)/;
+                    // 他人のセンダーヘッダパターン
+                    // Teams上の送信者表示は「Lastname, Firstname」のカンマ区切り形式が標準。
+                    // この形式に限定することで、サイドバーのチャット名（「【XXX】残業連絡」など）
+                    // を他人センダーと誤判定するのを防ぐ。
+                    // 形式: 改行 → 名前(カンマ区切り) → 改行 → 時刻 (HH:MM)
+                    const otherSenderRe = /\\n([^\\n※\\[【()]{{2,40}},\\s+[^\\n※\\[【()]{{1,30}})\\n\\s*(?:\\d{{1,2}}:\\d{{2}}|昨日|今日)/;
 
                     // MY_NAMEの全出現位置
                     const senderPositions = [];
@@ -749,16 +752,33 @@ async def get_teams_message() -> str | None:
                             distance: distance,
                         }});
                     }}
-                    matches.sort((a, b) => {{
-                        if (a.fieldCount !== b.fieldCount) return b.fieldCount - a.fieldCount;
-                        return b.idx - a.idx;
-                    }});
                     // 本日付の候補だけ抽出
                     const todayCands = candidates.filter(c =>
                         c.date === "{today_str}" || c.date === "{today_str_short}"
                     );
+                    // 本日付の採用候補（除外理由なし）が存在するなら最優先で選ぶ
+                    // → サイドバープレビューでfieldCount不足でも本日付を採用する。
+                    //    fieldCount不足の場合は後段で「未送信＋警告通知」となる。
+                    const todayMatches = matches.filter(m =>
+                        m.date === "{today_str}" || m.date === "{today_str_short}"
+                    );
+                    let chosenMatch = null;
+                    if (todayMatches.length > 0) {{
+                        // 本日付の中で fieldCount が最大、同じなら最新位置(idx大)を採用
+                        todayMatches.sort((a, b) => {{
+                            if (a.fieldCount !== b.fieldCount) return b.fieldCount - a.fieldCount;
+                            return b.idx - a.idx;
+                        }});
+                        chosenMatch = todayMatches[0];
+                    }} else if (matches.length > 0) {{
+                        matches.sort((a, b) => {{
+                            if (a.fieldCount !== b.fieldCount) return b.fieldCount - a.fieldCount;
+                            return b.idx - a.idx;
+                        }});
+                        chosenMatch = matches[0];
+                    }}
                     return {{
-                        match: matches.length ? matches[0] : null,
+                        match: chosenMatch,
                         candidates: candidates,
                         todayCandidates: todayCands,
                         senderCount: senderPositions.length,
@@ -797,9 +817,25 @@ async def get_teams_message() -> str | None:
             # フィールド不足のまま送信すると他人投稿の混入や不完全送信の恐れがあるため、
             # 必ず 3/3 揃っていることを確認する
             if field_count < 3:
+                # 本日付が見つかったがフィールド不足 = サイドバープレビューのみ取得できた状態
+                # この場合、Teams本文側の同期が遅延している可能性が高いため、
+                # ユーザーに手動入力を促す urgent 通知を出す
+                is_today_msg = (msg_date == today_str or msg_date == today_str_short)
                 log(f"[スキップ] フィールドが不足しています（{field_count}/3）。"
                     "Teams上の該当メッセージがまだ完全に描画されていない可能性があります。"
                     "次回実行で再試行します。")
+                if is_today_msg:
+                    log(f"本日({msg_date})のメッセージは検出されたものの本文側に届いていません。")
+                    notify_urgent(
+                        "MyTim 残業申請 ⚠ Teams同期遅延",
+                        f"本日({msg_date})の残業申請投稿は検出されましたが、\n"
+                        f"Teams Web本文への同期が遅延しています（{field_count}/3 フィールドのみ取得）。\n\n"
+                        "対処方法:\n"
+                        "1) 数分後にもう一度 MyTim_残業申請.lnk を実行\n"
+                        "2) または python setup.py で Teams を再同期\n"
+                        "3) どちらもダメなら MyTim を直接ブラウザで開いて手動入力:\n"
+                        "   https://whm.accenture.com/mytim/secure/punchClock",
+                    )
                 return None
 
             # 必須フィールドが揃っていることも確認（保険）
