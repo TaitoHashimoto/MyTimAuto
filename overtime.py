@@ -784,6 +784,19 @@ async def get_teams_message() -> str | None:
                         }});
                         chosenMatch = matches[0];
                     }}
+                    // 全体（他人含む）の最新日付を計算
+                    // Teamsが同期できているかの判定指標
+                    let overallLatestDate = null;
+                    for (const d of dates) {{
+                        // YYYY/MM/DD 形式（ゼロ埋め）に正規化して比較
+                        const parts = d.date.split("/");
+                        const norm = parts[0] + "/" +
+                                     parts[1].padStart(2, "0") + "/" +
+                                     parts[2].padStart(2, "0");
+                        if (!overallLatestDate || norm > overallLatestDate) {{
+                            overallLatestDate = norm;
+                        }}
+                    }}
                     return {{
                         match: chosenMatch,
                         candidates: candidates,
@@ -791,6 +804,7 @@ async def get_teams_message() -> str | None:
                         senderCount: senderPositions.length,
                         dateCount: dates.length,
                         senderPositions: senderPositions,
+                        overallLatestDate: overallLatestDate,
                     }};
                 }}
             """)
@@ -857,26 +871,51 @@ async def get_teams_message() -> str | None:
 
             if not message_is_today(clean):
                 log(f"自分の最新メッセージは {msg_date} で本日ではないため却下します")
-                # 検出メッセージが2日以上前ならセッション切れの可能性を警告
-                try:
-                    parts = msg_date.split("/")
-                    mdate = date(int(parts[0]), int(parts[1]), int(parts[2]))
-                    days_old = (today_jst() - mdate).days
-                    if days_old >= 2:
-                        log(f"[警告] 検出された最新メッセージは{days_old}日前のものです。")
-                        log("Teamsで「もう一度サインインする必要があります」バナーが出ている可能性があります。")
-                        log("→ その場合は setup.py を実行してTeamsに再サインインしてください。")
-                        # MessageBox で確実にユーザーに気づかせる（OKを押すまで消えない）
-                        notify_urgent(
-                            "MyTim残業報告 ⚠ Teams再サインインが必要",
-                            f"Teamsの最新メッセージが{days_old}日前のままで、新しい投稿が取得できません。\n\n"
-                            "セッションが切れている可能性があります。\n"
-                            "以下を実行してTeamsに再サインインしてください:\n\n"
-                            "  python setup.py\n\n"
-                            "完了後、もう一度 overtime.py を実行してください。",
-                        )
-                except (ValueError, IndexError):
-                    pass
+                # Teamsの同期状態を「全体（他人含む）の最新日付」で判断する。
+                # 他人含む最新が直近3日以内なら Teams は正常に同期されているとみなす
+                # （金曜→月曜の週末ギャップや、誰も投稿しない日があっても OK）
+                # それより古い場合のみ「再サインインが必要」と判定。
+                overall_latest = my_latest.get("overallLatestDate")
+                log(f"Teams全体の最新日付（他人含む）: {overall_latest}")
+                teams_synced = False
+                days_old_overall = None
+                if overall_latest:
+                    try:
+                        parts = overall_latest.split("/")
+                        oldate = date(int(parts[0]), int(parts[1]), int(parts[2]))
+                        days_old_overall = (today_jst() - oldate).days
+                        # 3日以内に誰かの投稿があれば同期OK（週末ギャップ吸収）
+                        teams_synced = days_old_overall <= 3
+                        log(f"Teams全体の最新は{days_old_overall}日前 → "
+                            f"{'同期OK（警告抑制）' if teams_synced else '同期遅延の可能性'}")
+                    except (ValueError, IndexError):
+                        pass
+
+                # 本日中に既に警告を出していれば再表示しない
+                state_now = load_state()
+                today_iso = today_jst().isoformat()
+                already_warned = state_now.get("last_warning_date") == today_iso
+
+                if teams_synced:
+                    log("Teamsは同期されているため、警告通知は出しません。")
+                elif already_warned:
+                    log("本日は既に警告通知済みのため、MessageBoxはスキップします。")
+                else:
+                    # 警告条件: Teams全体も4日以上更新が無く、本日初回の警告
+                    log(f"[警告] Teams全体の最新が{days_old_overall}日前で、新しい投稿が確認できません。")
+                    log("Teamsセッション切れの可能性があるため警告を表示します。")
+                    notify_urgent(
+                        "MyTim残業報告 ⚠ Teams再サインインが必要",
+                        f"Teamsの最新投稿（他人含む）も{days_old_overall}日前のままで、"
+                        "新しい投稿が取得できていません。\n\n"
+                        "セッションが切れている可能性があります。\n"
+                        "以下を実行してTeamsに再サインインしてください:\n\n"
+                        "  python setup.py\n\n"
+                        "完了後、もう一度 overtime.py を実行してください。",
+                    )
+                    # 本日の警告済みフラグを保存
+                    state_now["last_warning_date"] = today_iso
+                    save_state(state_now)
                 return None
 
             return clean
