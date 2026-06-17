@@ -675,7 +675,10 @@ async def get_teams_message() -> str | None:
             my_latest = await page.evaluate(f"""
                 () => {{
                     const sender = "{MY_NAME}";
-                    const body   = document.body.innerText || "";
+                    // 各種の空白文字（\\xa0 nbsp / 全角\\u3000 / タブ）を半角スペースに
+                    // 統一して、MY_NAME 検出の取りこぼしを防ぐ。
+                    const body   = (document.body.innerText || "")
+                        .replace(/[\\u00a0\\u3000\\t]/g, ' ');
                     const dateRe = /日付[：:]\\s*(\\d{{4}})\\/(\\d{{1,2}})\\/(\\d{{1,2}})/g;
                     const nextDateRe = /日付[：:]\\s*\\d{{4}}\\/\\d{{1,2}}\\/\\d{{1,2}}/;
                     // 他人のセンダーヘッダパターン
@@ -685,10 +688,24 @@ async def get_teams_message() -> str | None:
                     // 形式: 改行 → 名前(カンマ区切り) → 改行 → 時刻 (HH:MM)
                     const otherSenderRe = /\\n([^\\n※\\[【()]{{2,40}},\\s+[^\\n※\\[【()]{{1,30}})\\n\\s*(?:\\d{{1,2}}:\\d{{2}}|昨日|今日)/;
 
-                    // MY_NAMEの全出現位置
+                    // MY_NAMEの全出現位置を正規表現で柔軟に検出
+                    // 「姓, 名」の間にどんな空白/区切りが入ってもマッチさせる。
+                    // また、Teamsが自分の投稿ヘッダを「あなた」と表記するケースも
+                    // カバーするため、「あなた」（次行が時刻のもの）も対象に含める。
+                    const senderParts = sender.split(/[,\\s]+/).filter(s => s);  // ["Hashimoto", "Taito"]
+                    const senderRePattern = senderParts.map(s =>
+                        s.replace(/[.*+?^${{}}()|[\\]\\\\]/g, '\\\\$&')
+                    ).join('[\\\\s,]+');
+                    // フル名 OR 「あなた」(直後に時刻パターンがある場合に限定して誤検出を避ける)
+                    const senderRe = new RegExp(
+                        '(?:' + senderRePattern + '|あなた(?=\\n\\s*(?:\\d{{1,2}}:\\d{{2}}|昨日|今日)))',
+                        'g'
+                    );
                     const senderPositions = [];
-                    let p = -1;
-                    while ((p = body.indexOf(sender, p + 1)) >= 0) senderPositions.push(p);
+                    let smatch;
+                    while ((smatch = senderRe.exec(body)) !== null) {{
+                        senderPositions.push(smatch.index);
+                    }}
 
                     // 全ての日付位置
                     const dates = [];
@@ -699,6 +716,17 @@ async def get_teams_message() -> str | None:
                             end: dm.index + dm[0].length,
                             date: dm[1] + "/" + dm[2] + "/" + dm[3],
                         }});
+                    }}
+
+                    // 全てのセンダーヘッダ位置（誰でも: カンマ区切り名 + 時刻、
+                    //                                or 「あなた」+ 時刻）
+                    // 日付の直前にある「最後のセンダーヘッダ」が誰かを判定するために使う。
+                    // 連続投稿でヘッダ省略されている場合は、その上のヘッダを使う。
+                    const senderHeaderRe = /\\n((?:[^\\n※\\[【()]{{2,40}},\\s+[^\\n※\\[【()]{{1,30}})|あなた)\\n\\s*(?:\\d{{1,2}}:\\d{{2}}|昨日|今日)/g;
+                    const senderHeaders = [];
+                    let sh;
+                    while ((sh = senderHeaderRe.exec(body)) !== null) {{
+                        senderHeaders.push({{ idx: sh.index, name: sh[1] }});
                     }}
 
                     // 各日付候補について全状況を記録（デバッグ用 candidates も含めて返す）
@@ -712,31 +740,62 @@ async def get_teams_message() -> str | None:
                         }}
                         const distance = precedingSender >= 0 ? (d.idx - precedingSender) : -1;
 
-                        // MY_NAMEと日付の間の文字列、および他人センダー検出
-                        let between = "";
-                        let otherSenderName = null;
-                        if (precedingSender >= 0) {{
-                            between = body.substring(precedingSender + sender.length, d.idx);
-                            const other = otherSenderRe.exec(between);
-                            if (other && !other[1].includes(sender)) {{
-                                otherSenderName = other[1];
+                        // この日付より前で「最後のセンダーヘッダ」を取得
+                        // → これが自分なら自分の投稿、他人なら他人の投稿と判定
+                        let lastSenderHeader = null;
+                        for (const sh of senderHeaders) {{
+                            if (sh.idx < d.idx) {{
+                                if (!lastSenderHeader || sh.idx > lastSenderHeader.idx) {{
+                                    lastSenderHeader = sh;
+                                }}
                             }}
                         }}
 
-                        // 除外理由を判定
+                        // 判定:
+                        //   1) 直前最終センダーヘッダが MY_NAME → 自分の投稿（採用）
+                        //   2) MY_NAMEを含むがヘッダが他人 → 他人の投稿（除外）
+                        //   3) センダーヘッダが見つからない → MY_NAME近接性で判定
+                        //      （Teams DOM構造の例外ケース。例: サイドバープレビュー）
                         let excludeReason = null;
-                        if (precedingSender < 0) excludeReason = "MY_NAME 先行なし";
-                        else if (distance > 300) excludeReason = `距離超過(${{distance}}文字)`;
-                        else if (otherSenderName) excludeReason = `他人のセンダー混在: ${{otherSenderName}}`;
+                        let isMine = false;
+                        let otherSenderName = null;
+                        if (lastSenderHeader) {{
+                            // ヘッダ名が「あなた」、または senderParts (姓・名) 両方を含めば自分
+                            const headerName = lastSenderHeader.name;
+                            const matchesSelf =
+                                headerName === "あなた" ||
+                                senderParts.every(part => headerName.includes(part));
+                            if (matchesSelf) {{
+                                isMine = true;
+                            }} else {{
+                                otherSenderName = headerName;
+                                excludeReason = `他人のセンダー混在: ${{otherSenderName}}`;
+                            }}
+                        }} else {{
+                            // ヘッダ無し → MY_NAMEが300文字以内に先行していれば自分の投稿
+                            if (precedingSender < 0) {{
+                                excludeReason = "MY_NAME 先行なし";
+                            }} else if (distance > 300) {{
+                                excludeReason = `距離超過(${{distance}}文字)`;
+                            }} else {{
+                                isMine = true;
+                            }}
+                        }}
 
                         // 候補として登録
+                        let betweenPreview = "";
+                        if (precedingSender >= 0) {{
+                            const tmp = body.substring(precedingSender + sender.length, d.idx);
+                            betweenPreview = tmp.substring(0, 80).replace(/\\n/g, "|");
+                        }}
                         const cand = {{
                             idx: d.idx,
                             date: d.date,
                             distance: distance,
                             otherSender: otherSenderName,
+                            lastSenderHeader: lastSenderHeader ? lastSenderHeader.name : null,
                             excludeReason: excludeReason,
-                            betweenPreview: between.substring(0, 80).replace(/\\n/g, "|"),
+                            betweenPreview: betweenPreview,
                         }};
                         candidates.push(cand);
                         if (excludeReason) continue;
