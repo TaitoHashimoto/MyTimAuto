@@ -754,11 +754,15 @@ async def get_teams_message() -> str | None:
                         // 判定:
                         //   1) 直前最終センダーヘッダが MY_NAME → 自分の投稿（採用）
                         //   2) MY_NAMEを含むがヘッダが他人 → 他人の投稿（除外）
+                        //      ただし、ユーザー特有の文言「残業申請します」などが直前に
+                        //      あり、かつ MY_NAME も近接していれば「連続投稿で直前ヘッダが
+                        //      省略された自分のメッセージ」として救済
                         //   3) センダーヘッダが見つからない → MY_NAME近接性で判定
                         //      （Teams DOM構造の例外ケース。例: サイドバープレビュー）
                         let excludeReason = null;
                         let isMine = false;
                         let otherSenderName = null;
+                        let rescuedByPhrase = false;
                         if (lastSenderHeader) {{
                             // ヘッダ名が「あなた」、または senderParts (姓・名) 両方を含めば自分
                             const headerName = lastSenderHeader.name;
@@ -768,8 +772,25 @@ async def get_teams_message() -> str | None:
                             if (matchesSelf) {{
                                 isMine = true;
                             }} else {{
-                                otherSenderName = headerName;
-                                excludeReason = `他人のセンダー混在: ${{otherSenderName}}`;
+                                // 救済判定: 日付直前500文字以内にユーザー特有の文言があれば自分の投稿
+                                // (Teamsの連続投稿で自分のヘッダが省略され、別人のヘッダが
+                                //  「最後のヘッダ」として検出される誤判定を回避)
+                                const before500 = body.substring(Math.max(0, d.idx - 500), d.idx);
+                                const myPhrases = [
+                                    "残業申請します",
+                                    "残業申請いたします",
+                                    "残業申請をいたします",
+                                ];
+                                const hasMyPhrase = myPhrases.some(ph => before500.includes(ph));
+                                // MY_NAMEの近接（distance < 500）も救済条件に含める
+                                const myNameNear = precedingSender >= 0 && distance < 500;
+                                if (hasMyPhrase && myNameNear) {{
+                                    isMine = true;
+                                    rescuedByPhrase = true;
+                                }} else {{
+                                    otherSenderName = headerName;
+                                    excludeReason = `他人のセンダー混在: ${{otherSenderName}}`;
+                                }}
                             }}
                         }} else {{
                             // ヘッダ無し → MY_NAMEが300文字以内に先行していれば自分の投稿
@@ -796,6 +817,7 @@ async def get_teams_message() -> str | None:
                             lastSenderHeader: lastSenderHeader ? lastSenderHeader.name : null,
                             excludeReason: excludeReason,
                             betweenPreview: betweenPreview,
+                            rescuedByPhrase: rescuedByPhrase,
                         }};
                         candidates.push(cand);
                         if (excludeReason) continue;
@@ -874,14 +896,14 @@ async def get_teams_message() -> str | None:
             today_cands = my_latest.get("todayCandidates", [])
             log(f"本日({today_str}/{today_str_short})の日付候補: {len(today_cands)}件")
             for i, c in enumerate(today_cands):
-                status = c.get("excludeReason") or "✅採用候補"
+                status = c.get("excludeReason") or ("✅採用候補(文言救済)" if c.get("rescuedByPhrase") else "✅採用候補")
                 log(f"  本日候補[{i}] 日付={c['date']} idx={c['idx']} 距離={c['distance']} → {status}")
                 if c.get("betweenPreview"):
                     log(f"           MY_NAME〜日付の間: {c['betweenPreview']}")
             # 全体の末尾も参考表示
             log(f"全候補末尾12件:")
             for i, c in enumerate(my_latest["candidates"][-12:]):
-                status = c.get("excludeReason") or "✅採用候補"
+                status = c.get("excludeReason") or ("✅採用候補(文言救済)" if c.get("rescuedByPhrase") else "✅採用候補")
                 log(f"  候補 日付={c['date']} idx={c['idx']} 距離={c['distance']} → {status}")
 
             match = my_latest.get("match")
