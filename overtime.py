@@ -1031,19 +1031,44 @@ async def _submit_on_page(page, hours: str, reason: str) -> bool:
 
         await page.wait_for_selector("text=標準労働時間超過報告", timeout=10_000)
         log("フォームが開きました")
+        await page.wait_for_timeout(1_500)
 
+        # ── 時間入力 ──
+        # Locator.clear() が無限待ちになるケースを回避するため、
+        # 短めのtimeoutでclear→失敗ならfillで上書き（type-over挙動で古い値は上書きされる）
         time_input = page.locator("input").last
-        await time_input.clear()
-        await time_input.fill(hours)
+        try:
+            await time_input.click(timeout=5_000)
+            await time_input.press("Control+A", timeout=3_000)
+            await time_input.press("Delete", timeout=3_000)
+        except Exception as e:
+            log(f"時間inputのクリアに失敗（続行）: {str(e)[:80]}")
+        try:
+            # force=True で focus/visibility チェックを緩めてfill
+            await time_input.fill(hours, timeout=10_000)
+        except Exception as e:
+            # fill 失敗時は type でキー入力してみる
+            log(f"時間inputのfillに失敗、typeを試行: {str(e)[:80]}")
+            await time_input.type(hours, timeout=10_000)
         log(f"報告時間: {hours}h")
 
+        # ── 理由入力 ──
         reason_input = page.locator("textarea").last
-        await reason_input.clear()
-        await reason_input.fill(reason)
+        try:
+            await reason_input.click(timeout=5_000)
+            await reason_input.press("Control+A", timeout=3_000)
+            await reason_input.press("Delete", timeout=3_000)
+        except Exception as e:
+            log(f"理由textareaのクリアに失敗（続行）: {str(e)[:80]}")
+        try:
+            await reason_input.fill(reason, timeout=15_000)
+        except Exception as e:
+            log(f"理由textareaのfillに失敗、typeを試行: {str(e)[:80]}")
+            await reason_input.type(reason, timeout=15_000)
         log(f"報告理由: {reason[:30]}...")
 
         submit_btn = page.locator("button:has-text('報告')").last
-        await submit_btn.click()
+        await submit_btn.click(timeout=10_000)
         await page.wait_for_timeout(3_000)
 
         await page.screenshot(path=str(BASE_DIR / "mytim_after_submit.png"), full_page=True)
@@ -1052,6 +1077,11 @@ async def _submit_on_page(page, hours: str, reason: str) -> bool:
         return True
 
     except Exception as e:
+        # エラー時はデバッグ用スクショを保存
+        try:
+            await page.screenshot(path=str(BASE_DIR / "mytim_error.png"), full_page=True)
+        except Exception:
+            pass
         log(f"MyTim報告エラー: {e}\n{traceback.format_exc()}")
         notify("残業報告エラー", str(e)[:80])
         return False
@@ -1138,11 +1168,48 @@ async def submit_overtime_report(hours: str, reason: str) -> bool:
         page = await ctx.new_page()
         try:
             log("MyTimに接続中...")
-            await page.goto(MYTIM_URL, timeout=60_000)
-            await page.wait_for_load_state("networkidle", timeout=20_000)
+            # 一時的ネットワークエラー対策: 最大3回リトライ
+            last_err = None
+            navigated = False
+            for nav_attempt in range(3):
+                try:
+                    await page.goto(MYTIM_URL, timeout=45_000)
+                    await page.wait_for_load_state("networkidle", timeout=20_000)
+                    navigated = True
+                    break
+                except Exception as e:
+                    last_err = e
+                    log(f"MyTim接続試行 {nav_attempt + 1}/3 失敗: {str(e)[:120]}")
+                    if nav_attempt < 2:
+                        wait_sec = (nav_attempt + 1) * 5
+                        log(f"  {wait_sec}秒待機してリトライします")
+                        await page.wait_for_timeout(wait_sec * 1000)
+            if not navigated:
+                # 全てのリトライが失敗した場合、reauth 経路で再試行
+                log("MyTim接続が3回失敗 → Edge再認証経路に切り替え")
+                await ctx.close()
+                await browser.close()
+                return await reauth_and_submit(hours, reason)
 
-            if urlparse(page.url).netloc != MYTIM_HOST:
+            # URL判定に加え、ページ本文に Session Timeout 表示が無いかも確認する
+            # (URLは MyTim のままだが、画面はセッション切れページを返すケースがある)
+            session_timed_out = False
+            try:
+                body_text = await page.inner_text("body", timeout=5_000)
+                if any(k in body_text for k in [
+                    "Session Timeout",
+                    "Session timeout",
+                    "セッションがタイムアウト",
+                    "再度ログインしてください",
+                ]):
+                    session_timed_out = True
+                    log("MyTim画面に Session Timeout を検知")
+            except Exception:
+                pass
+
+            if urlparse(page.url).netloc != MYTIM_HOST or session_timed_out:
                 # セッション切れ → Edge で自動再認証
+                log(f"セッション切れ検知（URL: {page.url[:80]} / timeout={session_timed_out}）")
                 await ctx.close()
                 await browser.close()
                 return await reauth_and_submit(hours, reason)
