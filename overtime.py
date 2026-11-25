@@ -1012,64 +1012,149 @@ async def _submit_on_page(page, hours: str, reason: str) -> bool:
     """MyTim フォームへの入力・送信（ページオブジェクト渡し）"""
     try:
         await page.wait_for_timeout(2_000)
-        clicked = await page.evaluate("""
-            () => {
-                const btn = [...document.querySelectorAll('*')].find(
-                    el => el.childElementCount === 0
-                      && el.textContent.trim() === '標準労働時間超過報告'
-                );
-                if (btn) { btn.click(); return true; }
-                return false;
-            }
-        """)
+
+        # ── 「標準労働時間超過報告」ボタンクリック ──
+        # Playwrightネイティブclickの方がReactイベントに確実に届くので優先
+        clicked = False
+        try:
+            btn = page.locator("button:has-text('標準労働時間超過報告'), "
+                               "[role='button']:has-text('標準労働時間超過報告')").first
+            if await btn.count() > 0:
+                await btn.click(timeout=5_000)
+                clicked = True
+        except Exception as e:
+            log(f"ネイティブclick失敗、evaluate にフォールバック: {str(e)[:80]}")
+        if not clicked:
+            clicked = await page.evaluate("""
+                () => {
+                    const btn = [...document.querySelectorAll('*')].find(
+                        el => el.childElementCount === 0
+                          && el.textContent.trim() === '標準労働時間超過報告'
+                    );
+                    if (btn) { btn.click(); return true; }
+                    return false;
+                }
+            """)
         if not clicked:
             screenshot_path = BASE_DIR / "mytim_debug.png"
             await page.screenshot(path=str(screenshot_path), full_page=True)
             log(f"「標準労働時間超過報告」ボタンが見つかりません。スクリーンショット: {screenshot_path}")
             return False
-        await page.wait_for_timeout(2_000)
+        await page.wait_for_timeout(2_500)
 
-        await page.wait_for_selector("text=標準労働時間超過報告", timeout=10_000)
+        # ── フォームダイアログが開くのを待機 ──
+        # 単に「標準労働時間超過報告」テキストがあるだけでは不十分
+        # (ボタンそのものが同テキストを持つため)。モーダル/ダイアログ内の
+        # 「報告」ボタンが可視になることで、フォーム本体の表示を確認する。
+        try:
+            await page.locator("button:has-text('報告')").last.wait_for(
+                state="visible", timeout=10_000
+            )
+        except Exception:
+            # 旧ロジックへフォールバック
+            await page.wait_for_selector("text=標準労働時間超過報告", timeout=10_000)
         log("フォームが開きました")
         await page.wait_for_timeout(1_500)
 
-        # ── 時間入力 ──
-        # Locator.clear() が無限待ちになるケースを回避するため、
-        # 短めのtimeoutでclear→失敗ならfillで上書き（type-over挙動で古い値は上書きされる）
-        time_input = page.locator("input").last
+        # ── 入力対象を厳密に特定 ──
+        # ページ全体の input/textarea から取ると打刻画面側の要素を誤って
+        # 掴む可能性がある。可視状態の最後の数値/テキスト入力に絞る。
+        candidates_js = """
+            () => {
+                const inputs = [...document.querySelectorAll('input')].filter(el => {
+                    if (!el.offsetParent) return false;  // 非表示除外
+                    const t = (el.type || '').toLowerCase();
+                    return t === 'text' || t === 'number' || t === '' || t === 'tel';
+                });
+                const textareas = [...document.querySelectorAll('textarea')].filter(
+                    el => el.offsetParent
+                );
+                return {
+                    inputCount: inputs.length,
+                    textareaCount: textareas.length,
+                };
+            }
+        """
+        counts = await page.evaluate(candidates_js)
+        log(f"可視input数={counts['inputCount']}, 可視textarea数={counts['textareaCount']}")
+
+        # ── 時間入力（可視input の最後のもの） ──
+        time_input = page.locator(
+            "input[type='text']:visible, input[type='number']:visible, input:not([type]):visible"
+        ).last
         try:
             await time_input.click(timeout=5_000)
+            await page.wait_for_timeout(300)
             await time_input.press("Control+A", timeout=3_000)
             await time_input.press("Delete", timeout=3_000)
+            await time_input.type(hours, delay=50, timeout=10_000)
         except Exception as e:
-            log(f"時間inputのクリアに失敗（続行）: {str(e)[:80]}")
+            log(f"時間inputの操作に失敗: {str(e)[:120]}")
+            try:
+                await time_input.fill(hours, timeout=10_000)
+            except Exception as e2:
+                log(f"時間input の fill もフォールバック失敗: {str(e2)[:120]}")
+                raise
+
+        # 入力結果を検証
         try:
-            # force=True で focus/visibility チェックを緩めてfill
-            await time_input.fill(hours, timeout=10_000)
-        except Exception as e:
-            # fill 失敗時は type でキー入力してみる
-            log(f"時間inputのfillに失敗、typeを試行: {str(e)[:80]}")
-            await time_input.type(hours, timeout=10_000)
-        log(f"報告時間: {hours}h")
+            actual_value = await time_input.input_value(timeout=3_000)
+            log(f"時間input の実際の値: '{actual_value}' (期待: '{hours}')")
+            if actual_value != hours:
+                log("[警告] 時間input の値が期待と異なる。再入力を試行")
+                await time_input.press("Control+A")
+                await time_input.press("Delete")
+                await time_input.type(hours, delay=100)
+                actual_value = await time_input.input_value()
+                log(f"再入力後の値: '{actual_value}'")
+                if actual_value != hours:
+                    raise RuntimeError(f"時間input への入力失敗: 実際='{actual_value}', 期待='{hours}'")
+        except Exception as ver_e:
+            log(f"時間input値の検証でエラー: {str(ver_e)[:120]}")
+            # 続行せず失敗扱いにする（EC1111等の送信エラーを防ぐため）
+            raise
+        log(f"報告時間: {hours}h （検証OK）")
 
         # ── 理由入力 ──
-        reason_input = page.locator("textarea").last
+        reason_input = page.locator("textarea:visible").last
         try:
             await reason_input.click(timeout=5_000)
+            await page.wait_for_timeout(300)
             await reason_input.press("Control+A", timeout=3_000)
             await reason_input.press("Delete", timeout=3_000)
+            await reason_input.fill(reason, timeout=10_000)
         except Exception as e:
-            log(f"理由textareaのクリアに失敗（続行）: {str(e)[:80]}")
-        try:
-            await reason_input.fill(reason, timeout=15_000)
-        except Exception as e:
-            log(f"理由textareaのfillに失敗、typeを試行: {str(e)[:80]}")
-            await reason_input.type(reason, timeout=15_000)
+            log(f"理由textareaの操作に失敗、typeを試行: {str(e)[:120]}")
+            try:
+                await reason_input.type(reason, delay=10, timeout=20_000)
+            except Exception as e2:
+                log(f"理由textareaのtypeも失敗: {str(e2)[:120]}")
+                raise
         log(f"報告理由: {reason[:30]}...")
 
+        # ── 送信 ──
         submit_btn = page.locator("button:has-text('報告')").last
         await submit_btn.click(timeout=10_000)
         await page.wait_for_timeout(3_000)
+
+        # ── 送信後のエラー検知 ──
+        # MyTim は入力エラー時に EC1111 等のコードを画面上部に表示する
+        try:
+            body_text = await page.inner_text("body", timeout=5_000)
+            import re as _re
+            err_match = _re.search(r"EC\d{4}[:：]\s*([^\n]{3,100})", body_text)
+            if err_match:
+                err_msg = err_match.group(0)
+                log(f"[ERROR] MyTim送信エラー検知: {err_msg}")
+                await page.screenshot(path=str(BASE_DIR / "mytim_error.png"), full_page=True)
+                notify(
+                    "残業報告エラー ⚠ 送信失敗",
+                    f"MyTimが送信を拒否しました:\n{err_msg[:100]}\n\n"
+                    "MyTimを直接開いて手動入力してください。",
+                )
+                return False
+        except Exception:
+            pass
 
         await page.screenshot(path=str(BASE_DIR / "mytim_after_submit.png"), full_page=True)
         log("[OK] 残業超過報告 送信完了")
